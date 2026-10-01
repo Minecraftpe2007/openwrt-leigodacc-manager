@@ -12,7 +12,7 @@ if [ -e /etc/asus_release ]; then
     echo ""
     echo "[ERROR] 检测到 ASUS 路由器，无法运行 OpenWrt LeigodAcc 管理器，你不是 OpenWrt 系统!"
 
-    if [ ! -d /jffs/softcenter ]; then
+    if [ -d /jffs/softcenter ]; then
         echo "[INFO] 检测到官改 or Koolcenter 版本，即将脱离 OpenWrt 管理器运行官方脚本开始安装."
         echo "[INFO] 以下内容均与 OpenWrt 管理器作者无关，本人并无华硕路由器 Debug!"
         echo
@@ -27,7 +27,7 @@ if [ -d /userdisk/appdata ]; then
     echo "R u OK?"
     echo ""
     echo "[ERROR] 检测到小米路由器，无法运行 OpenWrt LeigodAcc 管理器，你不是 OpenWrt 系统!"
-    local name=$(uci get misc.hardware.displayName 2>/dev/null)
+    name=$(uci get misc.hardware.displayName 2>/dev/null)
     if [[ $? != "0" || -z ${name} ]]; then
         name=$(uci get misc.hardware.model 2>/dev/null)
     fi
@@ -63,6 +63,68 @@ if [ -x /usr/sbin/fw4 ]; then
     echo ""
     sleep 3
 fi
+
+# 包管理器: OpenWrt 25.x 及之后使用 apk，之前使用 opkg
+if command -v apk >/dev/null 2>&1; then
+    PKG_MGR=apk
+elif command -v opkg >/dev/null 2>&1; then
+    PKG_MGR=opkg
+else
+    echo "[ERROR] 未找到 opkg 或 apk 包管理器，无法继续!"
+    exit 1
+fi
+
+pkg_update() {
+    if [ "$PKG_MGR" = "apk" ]; then
+        apk update
+    else
+        [ -e /var/lock/opkg.lock ] && rm /var/lock/opkg.lock
+        opkg update
+    fi
+}
+
+pkg_install() {
+    if [ "$PKG_MGR" = "apk" ]; then
+        apk add "$@"
+    else
+        opkg install "$@"
+    fi
+}
+
+pkg_remove() {
+    if [ "$PKG_MGR" = "apk" ]; then
+        apk del "$@"
+    else
+        opkg remove "$@"
+    fi
+}
+
+# 精确匹配已安装包名 (避免 conntrack 匹配到 conntrackd 之类的子串误判)
+pkg_installed() {
+    if [ "$PKG_MGR" = "apk" ]; then
+        apk info -e "$1" >/dev/null 2>&1
+    else
+        opkg list-installed 2>/dev/null | grep -q "^$1 - "
+    fi
+}
+
+# 软件源中是否存在该包 (精确匹配)
+pkg_available() {
+    if [ "$PKG_MGR" = "apk" ]; then
+        apk search -x "$1" 2>/dev/null | grep -q .
+    else
+        opkg list 2>/dev/null | grep -q "^$1 - "
+    fi
+}
+
+# 取最具体的架构 (opkg: 忽略 all/noarch，多架构时取优先级最高即最后一行)
+get_arch() {
+    if [ "$PKG_MGR" = "apk" ]; then
+        apk --print-arch
+    else
+        opkg print-architecture | awk '$1=="arch" && $2!="all" && $2!="noarch" {a=$2} END {print a}'
+    fi
+}
 
 leigod_menu() {
     echo
@@ -101,7 +163,7 @@ install_leigodacc() {
     fi
 
     if [ -f /etc/catwrt_release ]; then
-        if ! grep -q -E "catwrt|repo.miaoer.xyz" /etc/opkg/distfeeds.conf && ! ip a | grep -q -E "192\.168\.[0-9]+\.[0-9]+|10\.[0-9]+\.[0-9]+\.[0-9]+|172\.1[6-9]\.[0-9]+\.[0-9]+|172\.2[0-9]+\.[0-9]+|172\.3[0-1]\.[0-9]+\.[0-9]+"; then
+        if ! grep -q -E "catwrt|repo.miaoer.xyz" /etc/opkg/distfeeds.conf 2>/dev/null && ! ip a | grep -q -E "192\.168\.[0-9]+\.[0-9]+|10\.[0-9]+\.[0-9]+\.[0-9]+|172\.1[6-9]\.[0-9]+\.[0-9]+|172\.2[0-9]+\.[0-9]+|172\.3[0-1]\.[0-9]+\.[0-9]+"; then
             echo "[ERROR] 检测到 CatWrt，请先配置 CatWrt 软件源，请使用:"
             echo "Cattools - Apply_repo"
             echo
@@ -110,8 +172,12 @@ install_leigodacc() {
             return
         fi
     else
-        echo "cat /etc/opkg/customfeeds.conf" && cat /etc/opkg/customfeeds.conf
-        echo "cat /etc/opkg/distfeeds.conf" && cat /etc/opkg/distfeeds.conf
+        if [ "$PKG_MGR" = "opkg" ]; then
+            echo "cat /etc/opkg/customfeeds.conf" && cat /etc/opkg/customfeeds.conf
+            echo "cat /etc/opkg/distfeeds.conf" && cat /etc/opkg/distfeeds.conf
+        else
+            echo "cat /etc/apk/repositories.d/*" && cat /etc/apk/repositories.d/* 2>/dev/null
+        fi
         if [ ! -f /usr/bin/cattools ]; then
             echo "[AD] 你还没有安装 Cattools 以方便安装 LeigodAcc 中依赖部分缺少的组件"
             echo "请查看 https://github.com/miaoermua/cattools 或使用"
@@ -125,30 +191,29 @@ install_leigodacc() {
         echo "Detected third-party firmware: $(echo "$release_info" | grep -E "iStoreOS|QWRT|ImmortalWrt|LEDE")"
     fi
 
-    [ -e /var/lock/opkg.lock ] && rm /var/lock/opkg.lock
-    opkg update
+    pkg_update
 
     for pkg in libpcap iptables kmod-ipt-nat iptables-mod-tproxy kmod-ipt-ipset ipset; do
-        if ! opkg list_installed | grep -q "$pkg"; then
+        if ! pkg_installed "$pkg"; then
             echo "[INFO] 正在安装必备组件 $pkg"
-            opkg install $pkg
+            pkg_install $pkg
         else
             echo "[INFO] $pkg 必备组件已安装，跳过"
         fi
     done
 
     for pkg in kmod-tun kmod-ipt-tproxy kmod-netem tc-full conntrack; do
-        if ! opkg list_installed | grep -q "$pkg"; then
+        if ! pkg_installed "$pkg"; then
             echo "[INFO] 尝试安装 $pkg"
-            opkg install $pkg
+            pkg_install $pkg
         else
             echo "[INFO] $pkg 已安装，跳过"
         fi
     done
 
-    if ! opkg list-installed | grep -q 'luci-app-upnp'; then
+    if ! pkg_installed luci-app-upnp; then
         echo "[INFO] luci-app-upnp 未安装，正在安装..."
-        opkg install luci-app-upnp
+        pkg_install luci-app-upnp
     fi
 
     if [ -f /etc/config/upnpd ]; then
@@ -164,7 +229,7 @@ install_leigodacc() {
         echo
     else
         echo "[ERROR] UPnP 配置不存在，安装可能失败，请检查固件!"
-        exit 1
+        return 1
     fi
 
     echo "[INFO] 下面是雷神官方提供的脚本,打印内容偏长如遇到问题请提供输出内容(截图/文字)反馈到群里."
@@ -179,7 +244,7 @@ install_leigodacc() {
     fi
 
     for pkg in kmod-tun kmod-ipt-tproxy kmod-netem tc-full kmod-ipt-ipset conntrack curl libpcap iptables kmod-ipt-nat iptables-mod-tproxy ipset; do
-        if ! opkg list_installed | grep -q "$pkg"; then
+        if ! pkg_installed "$pkg"; then
             echo "[INFO] 缺少组件包: $pkg"
             echo "[INFO] 你可以通过管理器中的安装依赖性组件进行补充!"
         fi
@@ -187,7 +252,13 @@ install_leigodacc() {
 }
 
 install_compatibility_dependencies() {
-    arch=$(opkg print-architecture | grep "arch" | awk '{print $2}' | grep -v "all\|noarch")
+    if [ "$PKG_MGR" = "apk" ]; then
+        echo "[ERROR] 当前系统使用 apk，兼容性依赖仅提供 23.05 的 ipk，不适用"
+        echo "请改用固件软件源安装: apk update && apk add tc-full conntrack conntrackd"
+        return 1
+    fi
+
+    arch=$(get_arch)
     if [ -z "$arch" ]; then
         echo "[ERROR] 无法确定系统架构"
         return
@@ -233,16 +304,17 @@ install_compatibility_dependencies() {
     esac
 
     for pkg in $packages; do
-        if ! opkg list_installed | grep -q "$pkg"; then
+        if ! pkg_installed "$pkg"; then
             echo "[INFO] 安装 $pkg"
-            opkg install $pkg
+            pkg_install $pkg
         else
             echo "[INFO] $pkg 已安装，跳过"
         fi
     done
 
+    tmp_dir=$(mktemp -d /tmp/leigod.XXXXXX) || { echo "[ERROR] 无法创建临时目录"; return 1; }
     for pkg in $packages; do
-        if ! opkg list_installed | grep -q "$pkg"; then
+        if ! pkg_installed "$pkg"; then
             echo "[INFO] $pkg 未在官方源中找到，尝试使用第三方源"
             echo "[INFO] 正在使用天灵 immortalwrt pku 的软件源，并不是原生支持的软件包可能会存在你所在的第三方固件源除外的问题"
             for url in $urls; do
@@ -255,7 +327,7 @@ install_compatibility_dependencies() {
     rm -rf "$tmp_dir"
 
     for pkg in kmod-tun kmod-ipt-tproxy kmod-netem tc-full kmod-ipt-ipset conntrack curl libpcap iptables kmod-ipt-nat iptables-mod-tproxy ipset; do
-        if ! opkg list_installed | grep -q "$pkg"; then
+        if ! pkg_installed "$pkg"; then
             echo "[ERROR] 缺少包: $pkg"
             echo "Tip: 你可以到 immoralwrt 官网构建固件并勾选对应的组件替换掉当前系统,或者使用 CatWrt.v24.9 支持 LeigodAcc 全部依赖."
             echo "https://www.miaoer.net/posts/network/catwrt"
@@ -282,26 +354,32 @@ uninstall_leigodacc() {
             ;;
     esac
 
-    if opkg list_installed | grep -q "leigod-acc"; then
-        echo "[INFO] leigod-acc 通过 opkg 安装，正在卸载"
+    if pkg_installed leigod-acc; then
+        echo "[INFO] leigod-acc 通过包管理器安装，正在卸载"
         /etc/init.d/acc disable
         /etc/init.d/acc stop
-        opkg remove luci-i18n-leigod-acc-zh-cn luci-app-leigod-acc leigod-acc
+        pkg_remove luci-i18n-leigod-acc-zh-cn luci-app-leigod-acc leigod-acc
         rm -rf /usr/lib/lua/luci/model/cbi/leigod
         rm -rf /usr/lib/lua/luci/view/leigod
         rm -rf /usr/sbin/leigod
         rm -rf /tmp/luci-*
         echo "[INFO] leigod-acc 卸载成功"
+    elif [ -x /usr/sbin/leigod/leigod_uninstall.sh ]; then
+        # 官方新版自带卸载脚本: 先停守护、清防火墙规则、再停进程、最后删文件，避免卸载中途断网
+        echo "[INFO] 使用官方卸载脚本"
+        sh /usr/sbin/leigod/leigod_uninstall.sh
+        rm -rf /tmp/luci-*
+        echo "[INFO] LeigodAcc 卸载完成"
     else
-        rm /etc/config/accelerator
+        rm -f /etc/config/accelerator
         /etc/init.d/acc disable
         /etc/init.d/acc stop
-        rm /etc/init.d/acc
-        rm /usr/lib/lua/luci/controller/acc.lua
+        rm -f /etc/init.d/acc
+        rm -f /usr/lib/lua/luci/controller/acc.lua
         rm -rf /usr/lib/lua/luci/model/cbi/leigod
         rm -rf /usr/lib/lua/luci/view/leigod
         rm -rf /usr/sbin/leigod
-        rm /usr/lib/lua/luci/i18n/acc.zh-cn.lmo
+        rm -f /usr/lib/lua/luci/i18n/acc.zh-cn.lmo
         rm -rf /tmp/luci-*
         echo "[INFO] leigod-acc 卸载成功"
     fi
@@ -335,11 +413,44 @@ switch_mode() {
         return
     fi
 
+    FIREWALL_INI="/etc/config/acc_firewall.ini"
+
+    if [ -f "$FIREWALL_INI" ]; then
+        # 官方新版: 模式保存在 acc_firewall.ini 的 mode=，由 /etc/init.d/acc 读取
+        current_mode=$(grep "^mode=" "$FIREWALL_INI" | head -1 | cut -d'=' -f2-)
+        if [ "$current_mode" = "tun" ]; then
+            new_mode="tproxy"
+        else
+            new_mode="tun"
+        fi
+
+        if [ "$new_mode" = "tun" ]; then
+            [ -e /dev/net/tun ] || modprobe tun >/dev/null 2>&1
+            if [ ! -e /dev/net/tun ] && ! lsmod | grep -q "^tun "; then
+                echo "[ERROR] 系统不支持 tun (缺少 kmod-tun)，未切换"
+                return 1
+            fi
+        else
+            modprobe xt_TPROXY >/dev/null 2>&1
+            if ! lsmod | grep -q "^xt_TPROXY "; then
+                echo "[ERROR] 系统不支持 tproxy (缺少 kmod-ipt-tproxy / kmod-nft-tproxy)，未切换"
+                return 1
+            fi
+        fi
+
+        sed -i "s|^mode=.*|mode=${new_mode}|" "$FIREWALL_INI"
+        echo "[INFO] 已切换为 ${new_mode} 模式"
+        /etc/init.d/acc stop
+        /etc/init.d/acc start
+        echo "[INFO] 已经重启 LeigodAcc 服务"
+        return 0
+    fi
+
     ## https://github.com/miaoermua/openwrt-leigodacc-manager/issues/6
     echo "当前版本可能不支持切换模式"
     echo
 
-    if opkg list-installed | grep -q "^leigod-acc"; then
+    if pkg_installed leigod-acc; then
         current_tun=$(uci get accelerator.base.tun 2>/dev/null)
 
         if [ "$current_tun" = "1" ]; then
@@ -393,15 +504,12 @@ disabled_ipv6() {
 }
 
 install_lean_ipkg_version() {
-    if opkg list_installed | grep -q "leigod-acc"; then
+    if pkg_installed leigod-acc; then
         echo "[INFO] leigod-acc 已安装，L 有大雕"
         return
     else
         echo "[INFO] leigod-acc 未安装"
-        if [ -f /var/lock/opkg.lock ]; then
-            rm /var/lock/opkg.lock
-        fi
-        opkg update
+        pkg_update
     fi
 
     if [ -d /usr/sbin/leigod ]; then
@@ -414,7 +522,7 @@ install_lean_ipkg_version() {
 
     echo "[INFO] 检查在线软件源中是否存在所有依赖包..."
     for package in $required_packages; do
-        if ! opkg list | grep -q "^$package"; then
+        if ! pkg_available "$package"; then
             echo "[ERROR] 在线软件源中缺少依赖包: $package"
             missing_packages="$missing_packages $package"
         fi
@@ -433,21 +541,26 @@ install_lean_ipkg_version() {
     echo "[INFO] 所有依赖包已在在线软件源中找到，正在安装缺失的依赖包..."
 
     for package in $required_packages; do
-        if ! opkg list_installed | grep -q "^$package"; then
+        if ! pkg_installed "$package"; then
             echo "[INFO] 安装依赖包: $package"
-            opkg install "$package"
+            pkg_install "$package"
         fi
     done
 
     echo "[INFO] 所有依赖包已安装！"
 
-    arch=`opkg print-architecture | awk 'END {print $2}'`
+    arch=$(get_arch)
 
-    if opkg list | grep -q "leigod-acc"; then
+    if pkg_available leigod-acc; then
         echo "[INFO] 软件源中检测到 leigod-acc 插件，正在安装..."
-        opkg install leigod-acc luci-app-leigod-acc luci-i18n-leigod-acc-zh-cn
+        pkg_install leigod-acc luci-app-leigod-acc luci-i18n-leigod-acc-zh-cn
         echo "[INFO] Lean 版本 leigod-acc 安装成功！"
     else
+        if [ "$PKG_MGR" = "apk" ]; then
+            echo "[ERROR] 在线软件源中没有 leigod-acc，且发布的 ipk 无法用 apk 安装"
+            echo "请使用管理器中的普通安装选项"
+            return 1
+        fi
         echo "[INFO] 在线软件源中没有找到 leigod-acc 包，将下载并安装相应的插件"
 
         case "$arch" in
@@ -486,9 +599,9 @@ install_lean_ipkg_version() {
         fi
     fi
     
-    if ! opkg list-installed | grep -q 'luci-app-upnp'; then
+    if ! pkg_installed luci-app-upnp; then
         echo "[INFO] luci-app-upnp 未安装，正在安装..."
-        opkg install luci-app-upnp
+        pkg_install luci-app-upnp
     fi
 
     if [ -f /etc/config/upnpd ]; then
@@ -504,52 +617,62 @@ install_lean_ipkg_version() {
         echo
     else
         echo "[ERROR] UPnP 配置不存在，安装可能失败，请检查固件是否存在问题!"
-        exit 1
+        return 1
     fi
 }
 
 check_logs() {
-    if ! opkg list-installed | grep -q "^tc-full"; then
+    if ! pkg_installed tc-full; then
         return 0
     fi
 
-    if grep -q "exec tc command failed" /tmp/acc/acc-gw.log-* && grep -q "No such file or directory" /tmp/acc/acc-gw.log-*; then
+    set -- /tmp/acc/acc-gw.log-*
+    [ -f "$1" ] || return 0
+
+    if grep -q "exec tc command failed" "$@" 2>/dev/null && grep -q "No such file or directory" "$@" 2>/dev/null; then
         echo "[ERROR] 检测到插件中的 tc-full 组件出现了 'exec tc command failed' 错误，可能是软件源或者固件提供的 tc-full 组件问题"
         echo "可能导致无法加速的问题，由于实装 tc-full 的用户过少，请自行测试加速问题或手动重装 tc-full 组件"
-        echo "opkg update && opkg remove tc-full && opkg install tc-full"
+        if [ "$PKG_MGR" = "apk" ]; then
+            echo "apk update && apk del tc-full && apk add tc-full"
+        else
+            echo "opkg update && opkg remove tc-full && opkg install tc-full"
+        fi
         echo
         sleep 5
     fi
 }
 
 check_acceleration() {
-    log_file="/tmp/acc/acc-gw.log-*.log"
+    # 通配符必须在不加引号的上下文中展开，取最新的一份日志
+    log_file=$(ls -t /tmp/acc/acc-gw.log-* 2>/dev/null | head -n 1)
 
-    if [ ! -f "$log_file" ]; then
+    if [ -z "$log_file" ] || [ ! -f "$log_file" ]; then
         return 1
     fi
 
-    if ! grep -q "S5 UDP" "$log_file"; then
-        return 1
-    fi
-
-    last_s5_udp_time=$(grep -Eo '^[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' "$log_file" | tail -1)
+    # 取最后一条 S5 UDP 日志的时间 (格式 MM-DD hh:mm:ss，没有年份)
+    last_s5_udp_time=$(grep "S5 UDP" "$log_file" | grep -Eo '^[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' | tail -n 1)
 
     if [ -z "$last_s5_udp_time" ]; then
         return 1
     fi
 
     current_time=$(date +%s)
-    log_time=$(date -d "$last_s5_udp_time" +%s)
+    log_time=$(date -d "$(date +%Y)-$last_s5_udp_time" +%s 2>/dev/null)
+    if [ -z "$log_time" ]; then
+        return 1
+    fi
     time_diff=$((current_time - log_time))
 
-    if [ "$time_diff" -gt 20 ]; then
+    # 最近一次 UDP 代理发生在 60 秒内才认为正在加速
+    if [ "$time_diff" -ge 0 ] && [ "$time_diff" -le 60 ]; then
         echo "[INFO] 检测到 UDP 被成功代理，加速成功"
     fi
 }
 
 check_openclash_mode() {
-    if ! pgrep -f "openclash" > /dev/null 2>&1; then
+    # pgrep -f 会匹配到 sh -c "$(curl ...)" 里整份脚本文本，这里只匹配进程名
+    if ! pgrep -x clash > /dev/null 2>&1; then
         echo "[Tip] 当你 OpenClash 为兼容模式(Tproxy),Leigod 需要切换为 TUN 模式以避免与加速器冲突"
         return 0
     fi
@@ -569,7 +692,7 @@ check_openclash_mode() {
             continue
         fi
 
-        if [ "$mode" = "rule" ] && [ "$enhanced_mode" = "redir-host" ];then
+        if [ "$enhanced_mode" = "redir-host" ]; then
             if grep -q "^tun:" "$config_file"; then
                 echo "[WARN] 运行模式可能存在冲突!"
                 echo "========================="
@@ -578,7 +701,7 @@ check_openclash_mode() {
                 echo
                 echo "[Tip] 当你 OpenClash 为兼容模式(Tproxy),Leigod 需要切换为 TUN 模式以避免与 Leigod-Acc 冲突!"
             fi
-        else
+        elif [ "$enhanced_mode" = "fake-ip" ]; then
             echo "[WARN] 运行模式冲突!"
             echo "=================="
             echo "检查到 OpenClash 运行在 Fake-IP 未处于 Redir-Host 兼容模式(Tproxy)"

@@ -25,7 +25,7 @@
 执行下列命令 **使用 Leigod Acc Manager**
 
 ```sh
-sh -c "$(curl -fsSL https://fastly.jsdelivr.net/gh/miaoermua/openwrt-leigodacc-manager@main/leigod.sh)"
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/Minecraftpe2007/openwrt-leigodacc-manager/main/leigod.sh)"
 ```
 
 > 此方法安装的不受 opkg 包管理器管理，无法通过 opkg 卸载雷神插件，IPKG Lean 版正在推进中 ✨ 点亮小星星可以吗
