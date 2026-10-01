@@ -364,16 +364,22 @@ uninstall_leigodacc() {
         rm -rf /usr/sbin/leigod
         rm -rf /tmp/luci-*
         echo "[INFO] leigod-acc 卸载成功"
+    elif [ -x /usr/sbin/leigod/leigod_uninstall.sh ]; then
+        # 官方新版自带卸载脚本: 先停守护、清防火墙规则、再停进程、最后删文件，避免卸载中途断网
+        echo "[INFO] 使用官方卸载脚本"
+        sh /usr/sbin/leigod/leigod_uninstall.sh
+        rm -rf /tmp/luci-*
+        echo "[INFO] LeigodAcc 卸载完成"
     else
-        rm /etc/config/accelerator
+        rm -f /etc/config/accelerator
         /etc/init.d/acc disable
         /etc/init.d/acc stop
-        rm /etc/init.d/acc
-        rm /usr/lib/lua/luci/controller/acc.lua
+        rm -f /etc/init.d/acc
+        rm -f /usr/lib/lua/luci/controller/acc.lua
         rm -rf /usr/lib/lua/luci/model/cbi/leigod
         rm -rf /usr/lib/lua/luci/view/leigod
         rm -rf /usr/sbin/leigod
-        rm /usr/lib/lua/luci/i18n/acc.zh-cn.lmo
+        rm -f /usr/lib/lua/luci/i18n/acc.zh-cn.lmo
         rm -rf /tmp/luci-*
         echo "[INFO] leigod-acc 卸载成功"
     fi
@@ -405,6 +411,39 @@ switch_mode() {
     if [ ! -f /etc/init.d/acc ]; then
         echo "[ERROR] 雷神服务文件不存在，是不是还没安装捏."
         return
+    fi
+
+    FIREWALL_INI="/etc/config/acc_firewall.ini"
+
+    if [ -f "$FIREWALL_INI" ]; then
+        # 官方新版: 模式保存在 acc_firewall.ini 的 mode=，由 /etc/init.d/acc 读取
+        current_mode=$(grep "^mode=" "$FIREWALL_INI" | head -1 | cut -d'=' -f2-)
+        if [ "$current_mode" = "tun" ]; then
+            new_mode="tproxy"
+        else
+            new_mode="tun"
+        fi
+
+        if [ "$new_mode" = "tun" ]; then
+            [ -e /dev/net/tun ] || modprobe tun >/dev/null 2>&1
+            if [ ! -e /dev/net/tun ] && ! lsmod | grep -q "^tun "; then
+                echo "[ERROR] 系统不支持 tun (缺少 kmod-tun)，未切换"
+                return 1
+            fi
+        else
+            modprobe xt_TPROXY >/dev/null 2>&1
+            if ! lsmod | grep -q "^xt_TPROXY "; then
+                echo "[ERROR] 系统不支持 tproxy (缺少 kmod-ipt-tproxy / kmod-nft-tproxy)，未切换"
+                return 1
+            fi
+        fi
+
+        sed -i "s|^mode=.*|mode=${new_mode}|" "$FIREWALL_INI"
+        echo "[INFO] 已切换为 ${new_mode} 模式"
+        /etc/init.d/acc stop
+        /etc/init.d/acc start
+        echo "[INFO] 已经重启 LeigodAcc 服务"
+        return 0
     fi
 
     ## https://github.com/miaoermua/openwrt-leigodacc-manager/issues/6
